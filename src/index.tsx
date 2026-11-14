@@ -1,115 +1,123 @@
+
 import {
-  ButtonItem,
   PanelSection,
   PanelSectionRow,
-  Navigation,
+  ToggleField,
   staticClasses
 } from "@decky/ui";
+
 import {
-  addEventListener,
-  removeEventListener,
   callable,
-  definePlugin,
-  toaster,
-  // routerHook
-} from "@decky/api"
-import { useState } from "react";
-import { FaShip } from "react-icons/fa";
+  definePlugin
+} from "@decky/api";
 
-// import logo from "../assets/logo.png";
+import { useEffect, useState } from "react";
+import { FaMusic } from "react-icons/fa";
 
-// This function calls the python function "add", which takes in two numbers and returns their sum (as a number)
-// Note the type annotations:
-//  the first one: [first: number, second: number] is for the arguments
-//  the second one: number is for the return value
-const add = callable<[first: number, second: number], number>("add");
+type Settings = {
+  enabled: boolean;
+  games: Record<string, string>;
+};
 
-// This function calls the python function "start_timer", which takes in no arguments and returns nothing.
-// It starts a (python) timer which eventually emits the event 'timer_event'
-const startTimer = callable<[], void>("start_timer");
+const getSettings = callable<[], Settings>("get_settings");
+const saveEnabled = callable<[enabled: boolean], boolean>("set_enabled");
 
 function Content() {
-  const [result, setResult] = useState<number | undefined>();
+  const [enabled, setEnabled] = useState(true);
+  const [games, setGames] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
 
-  const onClick = async () => {
-    const result = await add(Math.random(), Math.random());
-    setResult(result);
+  useEffect(() => {
+    let mounted = true;
+
+    getSettings()
+      .then((settings) => {
+        if (!mounted) return;
+
+        setEnabled(settings.enabled);
+        setGames(settings.games || {});
+      })
+      .catch((error) => {
+        console.error("GamePage BGM: Could not load settings", error);
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const onToggle = async (value: boolean) => {
+    try {
+      await saveEnabled(value);
+      setEnabled(value);
+    } catch (error) {
+      console.error("GamePage BGM: Could not save setting", error);
+    }
   };
 
   return (
-    <PanelSection title="Panel Section">
+    <PanelSection title="GamePage BGM">
       <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={onClick}
-        >
-          {result ?? "Add two numbers via Python"}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => startTimer()}
-        >
-          {"Start Python timer"}
-        </ButtonItem>
+        <ToggleField
+          label="Enable GamePage BGM"
+          description="Automatically play music on individual game pages."
+          checked={enabled}
+          onChange={onToggle}
+        />
       </PanelSectionRow>
 
-      {/* <PanelSectionRow>
-        <div style={{ display: "flex", justifyContent: "center" }}>
-          <img src={logo} />
+      <PanelSectionRow>
+        <div style={{ padding: "8px 0", opacity: 0.8 }}>
+          Music only plays on individual game details pages.
+          Home, Library and Store pages remain silent.
         </div>
-      </PanelSectionRow> */}
+      </PanelSectionRow>
 
-      {/*<PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          onClick={() => {
-            Navigation.Navigate("/decky-plugin-test");
-            Navigation.CloseSideMenus();
-          }}
-        >
-          Router
-        </ButtonItem>
-      </PanelSectionRow>*/}
+      <PanelSection title="Game Music Assignments">
+        {loading ? (
+          <PanelSectionRow>
+            <div>Loading settings...</div>
+          </PanelSectionRow>
+        ) : Object.keys(games).length === 0 ? (
+          <PanelSectionRow>
+            <div style={{ padding: "8px 0", opacity: 0.7 }}>
+              No games configured yet.
+            </div>
+          </PanelSectionRow>
+        ) : (
+          Object.entries(games).map(([appId, path]) => (
+            <PanelSectionRow key={appId}>
+              <div style={{ padding: "8px 0" }}>
+                <strong>Steam App ID: {appId}</strong>
+                <div style={{ opacity: 0.7, fontSize: "12px" }}>
+                  {path.split("/").pop()}
+                </div>
+              </div>
+            </PanelSectionRow>
+          ))
+        )}
+      </PanelSection>
     </PanelSection>
   );
-};
+}
 
 export default definePlugin(() => {
-  console.log("Template plugin initializing, this is called once on frontend startup")
-
-  // serverApi.routerHook.addRoute("/decky-plugin-test", DeckyPluginRouterTest, {
-  //   exact: true,
-  // });
-
-  // Add an event listener to the "timer_event" event from the backend
-  const listener = addEventListener<[
-    test1: string,
-    test2: boolean,
-    test3: number
-  ]>("timer_event", (test1, test2, test3) => {
-    console.log("Template got timer_event with:", test1, test2, test3)
-    toaster.toast({
-      title: "template got timer_event",
-      body: `${test1}, ${test2}, ${test3}`
-    });
-  });
+  console.log("GamePage BGM initialized");
 
   return {
-    // The name shown in various decky menus
-    name: "Test Plugin",
-    // The element displayed at the top of your plugin's menu
-    titleView: <div className={staticClasses.Title}>Decky Example Plugin</div>,
-    // The content of your plugin's menu
+    name: "GamePage BGM",
+    titleView: (
+      <div className={staticClasses.Title}>
+        GamePage BGM
+      </div>
+    ),
     content: <Content />,
-    // The icon displayed in the plugin list
-    icon: <FaShip />,
-    // The function triggered when your plugin unloads
+    icon: <FaMusic />,
     onDismount() {
-      console.log("Unloading")
-      removeEventListener("timer_event", listener);
-      // serverApi.routerHook.removeRoute("/decky-plugin-test");
-    },
+      console.log("GamePage BGM unloaded");
+    }
   };
 });
