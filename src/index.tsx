@@ -3,12 +3,24 @@ import {
   PanelSection,
   PanelSectionRow,
   ToggleField,
-  staticClasses
+  ButtonItem,
+  MenuItem,
+  Navigation,
+  staticClasses,
+  useParams,
+  findInReactTree,
+  findInTree,
+  findModuleByExport,
+  findModuleDetailsByExport,
+  fakeRenderComponent,
+  afterPatch,
+  beforePatch
 } from "@decky/ui";
 
 import {
   callable,
-  definePlugin
+  definePlugin,
+  routerHook
 } from "@decky/api";
 
 import { useEffect, useState } from "react";
@@ -70,6 +82,14 @@ function Content() {
       </PanelSectionRow>
 
       <PanelSectionRow>
+        <ButtonItem
+          label="Test Game Settings Route"
+          description="Temporarily open the Armored Core VI settings page."
+          onClick={() => Navigation.Navigate("/gamepage-bgm/1888160")}
+        />
+      </PanelSectionRow>
+
+      <PanelSectionRow>
         <div style={{ padding: "8px 0", opacity: 0.8 }}>
           Music only plays on individual game details pages.
           Home, Library and Store pages remain silent.
@@ -104,7 +124,461 @@ function Content() {
   );
 }
 
+const GAME_MENU_ITEM_KEY = "gamepage-bgm-change-music";
+
+const contextMenuState: { appId: number | null } = { appId: null };
+
+function extractAppId(...candidates: any[]): number | null {
+  for (const candidate of candidates) {
+    const value =
+      candidate?.appid ??
+      candidate?.app_id ??
+      candidate?.unAppID ??
+      candidate?.nAppID ??
+      candidate?.id ??
+      candidate;
+
+    const parsed = Number.parseInt(String(value), 10);
+    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function resolveLibraryContextMenu(): any {
+  try {
+    const module = findModuleByExport(
+      (candidate: any) =>
+        !!candidate?.toString?.().includes("().LibraryContextMenu"),
+      1
+    );
+
+    if (!module || typeof module !== "object") return null;
+
+    const sibling = Object.values(module).find(
+      (value: any) =>
+        typeof value === "function" &&
+        !!value?.toString?.().includes("navigator:")
+    );
+
+    if (typeof sibling !== "function") return null;
+
+    const component = fakeRenderComponent(sibling);
+    return component?.type?.prototype ? component.type : null;
+  } catch (error) {
+    console.error("GamePage BGM: Could not resolve Library context menu.", error);
+    return null;
+  }
+}
+
+function extractAppIdFromTree(node: any): number | null {
+  if (!node) return null;
+
+  const candidate = extractAppId(
+    node?.appid,
+    node?.overview?.appid,
+    node?._owner?.pendingProps?.overview?.appid,
+    node?.props?.overview?.appid
+  );
+
+  if (candidate) return candidate;
+
+  const children = node?.children ?? node?.props?.children;
+  if (!children) return null;
+
+  if (Array.isArray(children)) {
+    for (const child of children) {
+      const result = extractAppIdFromTree(child);
+      if (result) return result;
+    }
+  } else {
+    return extractAppIdFromTree(children);
+  }
+
+  return null;
+}
+
+function collectMenuChildArrays(
+  root: any,
+  arrays: any[][] = [],
+  seen = new WeakSet<object>()
+): any[][] {
+  if (!root) return arrays;
+
+  if (Array.isArray(root)) {
+    arrays.push(root);
+    root.forEach((child) => collectMenuChildArrays(child, arrays, seen));
+    return arrays;
+  }
+
+  if (typeof root !== "object" || seen.has(root)) return arrays;
+  seen.add(root);
+
+  collectMenuChildArrays(root.props?.children, arrays, seen);
+  collectMenuChildArrays(root.children, arrays, seen);
+  return arrays;
+}
+
+function isGameContextMenu(items: any[]): boolean {
+  if (!items?.length) return false;
+
+  return !!findInReactTree(items, (node: any) => {
+    const callback =
+      typeof node?.props?.onSelected === "function"
+        ? node.props.onSelected
+        : typeof node?.onSelected === "function"
+          ? node.onSelected
+          : null;
+
+    return !!callback?.toString?.().includes("launchSource");
+  });
+}
+
+function isLibraryAppContextMenu(items: any[]): boolean {
+  if (!items?.length) return false;
+
+  return !!findInReactTree(items, (node: any) => {
+    const callback =
+      typeof node?.props?.onSelected === "function"
+        ? node.props.onSelected
+        : typeof node?.onSelected === "function"
+          ? node.onSelected
+          : null;
+
+    if (!callback) return false;
+
+    const source = callback.toString();
+    return (
+      source.includes("launchSource") ||
+      source.includes("AppProperties") ||
+      source.includes("ShowAppProperties") ||
+      source.includes("InstallApp") ||
+      source.includes("Download")
+    );
+  });
+}
+
+function deriveAppIdFromMenuItems(
+  items: any[] | null,
+  fallback: number | null
+): number | null {
+  if (!items?.length) return fallback;
+
+  const owner = items.find(
+    (entry) => entry?._owner?.pendingProps?.overview?.appid
+  );
+
+  const fromOwner = extractAppId(
+    owner?._owner?.pendingProps?.overview?.appid
+  );
+  if (fromOwner) return fromOwner;
+
+  const overviewNode = findInTree(
+    items,
+    (node: any) => node?.overview?.appid ?? node?.props?.overview?.appid,
+    { walkable: ["props", "children", "_owner", "pendingProps"] }
+  );
+
+  const fromOverview = extractAppId(
+    overviewNode?.overview?.appid,
+    overviewNode?.props?.overview?.appid
+  );
+  if (fromOverview) return fromOverview;
+
+  const appNode = findInTree(
+    items,
+    (node: any) =>
+      node?.app?.appid ??
+      node?.props?.app?.appid ??
+      node?.appid ??
+      node?.props?.appid ??
+      node?.app_id ??
+      node?.props?.app_id,
+    { walkable: ["props", "children", "_owner", "pendingProps"] }
+  );
+
+  const fromApp = extractAppId(
+    appNode?.app?.appid,
+    appNode?.props?.app?.appid,
+    appNode?.appid,
+    appNode?.props?.appid,
+    appNode?.app_id,
+    appNode?.props?.app_id
+  );
+
+  return fromApp ?? fallback;
+}
+
+function insertGamePageBGMMenuItem(children: any, appId: number): void {
+  const items = Array.isArray(children)
+    ? children
+    : Array.isArray(children?.props?.children)
+      ? children.props.children
+      : Array.isArray(children?.children)
+        ? children.children
+        : null;
+
+  if (!items || !appId) return;
+
+  const existing = items.findIndex(
+    (entry: any) => entry?.key === GAME_MENU_ITEM_KEY
+  );
+  if (existing >= 0) items.splice(existing, 1);
+
+  const propertiesIndex = items.findIndex((item: any) =>
+    findInReactTree(
+      item,
+      (node: any) =>
+        typeof node?.onSelected === "function" &&
+        node.onSelected.toString().includes("AppProperties")
+    )
+  );
+
+  const menuItem = (
+    <MenuItem
+      key={GAME_MENU_ITEM_KEY}
+      onSelected={() => {
+        Navigation.CloseSideMenus?.();
+        Navigation.Navigate(`/gamepage-bgm/${appId}`);
+      }}
+    >
+      Choose Background Music…
+    </MenuItem>
+  );
+
+  if (propertiesIndex >= 0) {
+    items.splice(propertiesIndex, 0, menuItem);
+  } else {
+    items.push(menuItem);
+  }
+}
+
+function patchMenuItems(
+  menuItems: any,
+  fallbackAppId: number | null
+): number | null {
+  const candidates = collectMenuChildArrays(menuItems).filter(
+    (entries) => entries.length > 0
+  );
+
+  if (!candidates.length) return null;
+
+  const entries =
+    candidates.find((candidate) => isGameContextMenu(candidate)) ??
+    candidates.find((candidate) => isLibraryAppContextMenu(candidate)) ??
+    (fallbackAppId
+      ? candidates.find((candidate) => candidate.length > 1)
+      : null) ??
+    (fallbackAppId ? candidates[0] : null);
+
+  if (!entries) return null;
+
+  const appId = deriveAppIdFromMenuItems(entries, fallbackAppId);
+  if (!appId) return null;
+
+  insertGamePageBGMMenuItem(entries, appId);
+  return appId;
+}
+
+function patchRenderedContextMenu(
+  node: any,
+  state: { appId: number | null }
+): number | null {
+  const menuItems = node?.props?.children?.[0] ?? node?.props?.children ?? node;
+  const fallbackAppId = extractAppIdFromTree(node) ?? state.appId;
+  const patched = patchMenuItems(menuItems, fallbackAppId);
+
+  if (patched) state.appId = patched;
+  return patched;
+}
+
+function patchContextMenuFocus() {
+  const MenuComponent = resolveLibraryContextMenu();
+
+  if (!MenuComponent?.prototype) {
+    console.error("GamePage BGM: Library context-menu component not found.");
+    return null;
+  }
+
+  const state = contextMenuState;
+  const patches: { outer?: any; inner?: any; unmount?: any } = {};
+
+  if (typeof MenuComponent.prototype.componentWillUnmount === "function") {
+    patches.unmount = afterPatch(
+      MenuComponent.prototype,
+      "componentWillUnmount",
+      () => {
+        state.appId = null;
+      }
+    );
+  }
+
+  patches.outer = afterPatch(
+    MenuComponent.prototype,
+    "render",
+    (_args: any[], component: any) => {
+      let appId = extractAppId(
+        component?._owner?.pendingProps?.overview?.appid
+      );
+
+      if (!appId) {
+        const fallback = findInTree(
+          component?.props?.children,
+          (node: any) => node?.app?.appid,
+          { walkable: ["props", "children"] }
+        );
+        appId = extractAppId(fallback?.app?.appid);
+      }
+
+      if (appId) state.appId = appId;
+
+      if (!patches.inner) {
+        patches.inner = afterPatch(
+          component,
+          "type",
+          (_innerArgs: any[], rendered: any) => {
+            const renderedType = rendered?.type;
+
+            if (renderedType?.prototype?.render) {
+              afterPatch(
+                renderedType.prototype,
+                "render",
+                (_renderArgs: any[], result: any) => {
+                  const items = result?.props?.children?.[0];
+                  if (!Array.isArray(items) || !isGameContextMenu(items)) {
+                    return result;
+                  }
+
+                  const resolvedAppId = deriveAppIdFromMenuItems(
+                    items,
+                    appId ?? state.appId
+                  );
+
+                  if (resolvedAppId) {
+                    insertGamePageBGMMenuItem(items, resolvedAppId);
+                    state.appId = resolvedAppId;
+                  }
+
+                  return result;
+                }
+              );
+            } else {
+              patchRenderedContextMenu(rendered, state);
+            }
+
+            if (renderedType?.prototype?.shouldComponentUpdate) {
+              afterPatch(
+                renderedType.prototype,
+                "shouldComponentUpdate",
+                ([nextProps]: any[], shouldUpdate: any) => {
+                  const items = nextProps?.children;
+                  if (!Array.isArray(items) || shouldUpdate !== true) {
+                    return shouldUpdate;
+                  }
+
+                  const resolvedAppId = deriveAppIdFromMenuItems(
+                    items,
+                    appId ?? state.appId
+                  );
+
+                  if (resolvedAppId) {
+                    insertGamePageBGMMenuItem(items, resolvedAppId);
+                    state.appId = resolvedAppId;
+                  }
+
+                  return shouldUpdate;
+                }
+              );
+            }
+
+            return rendered;
+          }
+        );
+      } else if (appId) {
+        const patched = patchMenuItems(component?.props?.children, appId);
+        if (patched) state.appId = patched;
+      }
+
+      return component;
+    }
+  );
+
+  console.log("GamePage BGM: Library context-menu patch installed.");
+
+  return () => {
+    patches.outer?.unpatch();
+    patches.inner?.unpatch();
+    patches.unmount?.unpatch();
+    state.appId = null;
+  };
+}
+
+function patchSteamContextMenu() {
+  try {
+    const [module, _matchedExport, exportName] =
+      findModuleDetailsByExport(
+        (candidate: any) => {
+          const source = candidate?.toString?.();
+          return (
+            typeof source === "string" &&
+            source.includes("GetContextMenuManagerFromWindow(") &&
+            source.includes(".CreateContextMenuInstance(")
+          );
+        },
+        1
+      );
+
+    if (!module || !exportName || typeof module[exportName] !== "function") {
+      console.error("GamePage BGM: Steam context-menu creation function not found.");
+      return null;
+    }
+
+    const patch = beforePatch(
+      module,
+      exportName,
+      (args: any[]) => {
+        const patchedAppId = patchMenuItems(
+          args?.[0],
+          contextMenuState.appId
+        );
+        if (patchedAppId) contextMenuState.appId = patchedAppId;
+      }
+    );
+
+    console.log("GamePage BGM: Steam context-menu patch installed.");
+
+    return () => {
+      patch?.unpatch();
+      console.log("GamePage BGM: Steam context-menu patch removed.");
+    };
+  } catch (error) {
+    console.error("GamePage BGM: Context-menu patch failed.", error);
+    return null;
+  }
+}
+
+function GameSettingsPage() {
+  const { appid } = useParams<{ appid: string }>();
+
+  return (
+    <PanelSection title="GamePage BGM">
+      <PanelSectionRow>
+        <div style={{ padding: "8px 0" }}>
+          Game settings for Steam App ID: {appid}
+        </div>
+      </PanelSectionRow>
+    </PanelSection>
+  );
+}
+
+const GAME_SETTINGS_ROUTE = "/gamepage-bgm/:appid";
+
+
 export default definePlugin(() => {
+  routerHook.addRoute(GAME_SETTINGS_ROUTE, GameSettingsPage);
+
+  const contextMenuUnpatch = patchContextMenuFocus();
+  const showContextMenuUnpatch = patchSteamContextMenu();
+
   console.log("GamePage BGM initialized");
 
   return {
@@ -117,6 +591,10 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <FaMusic />,
     onDismount() {
+      showContextMenuUnpatch?.();
+      contextMenuUnpatch?.();
+      contextMenuState.appId = null;
+      routerHook.removeRoute(GAME_SETTINGS_ROUTE);
       console.log("GamePage BGM unloaded");
     }
   };
