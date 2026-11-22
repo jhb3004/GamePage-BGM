@@ -1,6 +1,7 @@
-
 import os
 import json
+import base64
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -212,6 +213,65 @@ class Plugin:
                 "error": str(error)
             }
 
+    async def get_music_artwork(self, path: str) -> str | None:
+        root = Path("/home/deck").resolve()
+
+        try:
+            selected = Path(path).resolve()
+
+            if not selected.is_relative_to(root):
+                return None
+
+            if (
+                not selected.is_file()
+                or selected.suffix.lower() not in {
+                    ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac"
+                }
+                or not os.access(selected, os.R_OK)
+            ):
+                return None
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".png",
+                delete=False
+            ) as artwork_file:
+                artwork_path = artwork_file.name
+
+            try:
+                subprocess.run(
+                    [
+                        "/usr/bin/ffmpeg",
+                        "-y",
+                        "-v", "error",
+                        "-i", str(selected),
+                        "-map", "0:v:0",
+                        "-frames:v", "1",
+                        "-vf",
+                        "scale=512:512:force_original_aspect_ratio=decrease",
+                        artwork_path
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=True,
+                    timeout=15
+                )
+
+                artwork = Path(artwork_path)
+
+                if not artwork.is_file() or artwork.stat().st_size > 5 * 1024 * 1024:
+                    return None
+
+                encoded = base64.b64encode(
+                    artwork.read_bytes()
+                ).decode("ascii")
+
+                return f"data:image/png;base64,{encoded}"
+
+            finally:
+                Path(artwork_path).unlink(missing_ok=True)
+
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
 
     async def set_game_music(self, app_id: str, path: str):
         app_id = str(app_id)

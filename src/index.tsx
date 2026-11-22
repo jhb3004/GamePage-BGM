@@ -2,6 +2,7 @@ import {
   PanelSection,
   PanelSectionRow,
   ModalRoot,
+  ConfirmModal,
   showModal,
   SliderField,
   DropdownItem,
@@ -71,6 +72,11 @@ const setGameMusic = callable<
 >("set_game_music");
 
 const removeGameMusic = callable<[appId: string], boolean>("remove_game_music");
+
+const getMusicArtwork = callable<
+[path: string],
+string | null
+>("get_music_artwork");
 
 function Content() {
   const [enabled, setEnabled] = useState(true);
@@ -766,6 +772,8 @@ function GameSettingsPage() {
     playbackMode: "loop"
   });
 
+  const [artwork, setArtwork] = useState<string | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [pickingMusic, setPickingMusic] = useState(false);
@@ -835,11 +843,45 @@ function GameSettingsPage() {
   }, [appid]);
 
   useEffect(() => {
+    let active = true;
+
+    if (loading || loadError || !gameSettings.music) {
+      setArtwork(null);
+      return;
+    }
+
+    setArtwork(null);
+
+    getMusicArtwork(gameSettings.music)
+    .then((result) => {
+      if (active) {
+        setArtwork(result);
+      }
+    })
+    .catch((error) => {
+      console.error(
+        "GamePage BGM: Could not load album artwork.",
+        error
+      );
+
+      if (active) {
+        setArtwork(null);
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [gameSettings.music, loading, loadError]);
+
+  useEffect(() => {
     if (loading || loadError || !settingsDirtyRef.current) {
       return;
     }
 
     const timeout = setTimeout(async () => {
+      if (!settingsDirtyRef.current) return;
+
       const settingsToSave = { ...gameSettingsRef.current };
 
       try {
@@ -916,112 +958,221 @@ function GameSettingsPage() {
     }
   };
 
+  const confirmRemoveMusic = () => {
+    let modalHandle: ReturnType<typeof showModal> | null = null;
+
+    const closeConfirmation = () => {
+      modalHandle?.Close();
+    };
+
+    modalHandle = showModal(
+      <ConfirmModal
+        strTitle="Remove Game Music?"
+        strDescription="This will remove the assigned music file and reset this game's settings, including volume, start offset and playback mode, to their defaults. The original audio file will not be deleted."
+        strOKButtonText="Remove Music"
+        strCancelButtonText="Cancel"
+        bDestructiveWarning={true}
+        onCancel={closeConfirmation}
+        onOK={async () => {
+          settingsDirtyRef.current = false;
+          closeConfirmation();
+
+          try {
+            await removeGameMusic(appid);
+
+            const defaultSettings: GameSettings = {
+              music: "",
+              volume: 100,
+              startOffset: 0,
+              playbackMode: "loop"
+            };
+
+            gameSettingsRef.current = defaultSettings;
+            setGameSettings(defaultSettings);
+            setArtwork(null);
+            setPickerError("");
+          } catch (error) {
+            settingsDirtyRef.current = true;
+            setGameSettings((current) => ({ ...current }));
+            console.error(
+              "GamePage BGM: Could not remove game music.",
+              error
+            );
+
+            setPickerError(
+              "Could not remove game music and reset its settings."
+            );
+          }
+        }}
+      />,
+      undefined,
+      {
+        bNeverPopOut: true
+      }
+    );
+  };
+
   return (
-    <PanelSection title="GamePage BGM">
+    <PanelSection title={"\u00A0"}>
       <PanelSectionRow>
-        <div style={{ padding: "8px 0" }}>
+        <div style={{ padding: "8px 0", width: "100%" }}>
           <div style={{ fontSize: "24px", fontWeight: 600, paddingBottom: "8px" }}>
             {gameTitle || "Loading game title..."}
           </div>
           <strong>Steam App ID: {appid}</strong>
-
-          {loading ? (
-            <div>Loading settings...</div>
-          ) : loadError ? (
-            <div>{loadError}</div>
-          ) : (
-            <>
-              <div>
-                Music:{" "}
-                {gameSettings.music
-                  ? gameSettings.music.split("/").pop()
-                  : "None selected"}
-              </div>
-              <div>
-                Volume: {gameSettings.volume}%
-              </div>
-              <div>
-                Start offset: {gameSettings.startOffset}s
-              </div>
-              <div>
-                Playback:{" "}
-                {gameSettings.playbackMode === "loop"
-                  ? "Loop"
-                  : "Play Once"}
-              </div>
-            </>
-          )}
         </div>
       </PanelSectionRow>
 
-      <ButtonItem
-        label="Select Music"
-        description={
-          pickingMusic
-            ? "Opening file picker..."
-            : "Select an audio file for this game"
-        }
-        onClick={chooseMusic}
-        disabled={loading || Boolean(loadError) || pickingMusic}
-      >
-        Browse local files
-      </ButtonItem>
+      {loading ? (
+        <PanelSectionRow>
+          <div>Loading settings...</div>
+        </PanelSectionRow>
+      ) : loadError ? (
+        <PanelSectionRow>
+          <div>{loadError}</div>
+        </PanelSectionRow>
+      ) : (
+        <PanelSectionRow>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(0, 1fr) minmax(0, 3.8fr)",
+              gap: "20px",
+              width: "100%",
+              alignItems: "start"
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              <div
+                style={{
+                  width: "100%",
+                  aspectRatio: "1 / 1",
+                  background: "#101b30",
+                  borderRadius: "8px",
+                  overflow: "hidden",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center"
+                }}
+              >
+                {artwork ? (
+                  <img
+                    src={artwork}
+                    alt="Album artwork"
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "contain"
+                    }}
+                  />
+                ) : (
+                  <div style={{ textAlign: "center", padding: "16px" }}>
+                    <div style={{ fontSize: "48px" }}>♫</div>
+                    <div>No artwork available</div>
+                  </div>
+                )}
+              </div>
+            </div>
 
-      <SliderField
-        label="Volume"
-        description="Adjust music volume (0–200%):"
-        value={gameSettings.volume}
-        min={0}
-        max={200}
-        step={1}
-        valueSuffix="%"
-        showValue={true}
-        disabled={loading || Boolean(loadError)}
-        onChange={(value) => {
-          settingsDirtyRef.current = true;
-          setGameSettings((current) => ({
-            ...current,
-            volume: value
-          }));
-        }}
-      />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ marginBottom: "16px", overflowWrap: "anywhere" }}>
+                <strong>Track</strong>
+                <div>
+                  {gameSettings.music
+                    ? gameSettings.music.split("/").pop()
+                    : "No music selected"}
+                </div>
 
-      <SliderField
-        label="Start Offset"
-        description="Choose where music starts from (0-300s):"
-        value={gameSettings.startOffset}
-        min={0}
-        max={300}
-        step={1}
-        valueSuffix="s"
-        showValue={true}
-        disabled={loading || Boolean(loadError)}
-        onChange={(value) => {
-          settingsDirtyRef.current = true;
-          setGameSettings((current) => ({
-            ...current,
-            startOffset: value
-          }));
-        }}
-      />
+                <div style={{ marginTop: "8px" }}>
+                  <strong>File location</strong>
+                  <div style={{ overflowWrap: "anywhere" }}>
+                    {gameSettings.music || "—"}
+                  </div>
+                </div>
+              </div>
 
-      <DropdownItem
-        label="Playback Mode"
-        description="Choose playback behaviour:"
-        rgOptions={[
-          { data: "loop", label: "Loop" },
-          { data: "once", label: "Play Once" }
-        ]}
-        selectedOption={gameSettings.playbackMode}
-        disabled={loading || Boolean(loadError)}
-        onChange={(option) => {
-          settingsDirtyRef.current = true;
-          setGameSettings((current) => ({
-            ...current,
-            playbackMode: option.data
-          }));
-        }}
-      />
+              <SliderField
+                label="Volume"
+                description="Adjust music volume:"
+                value={gameSettings.volume}
+                min={0}
+                max={200}
+                step={1}
+                valueSuffix="%"
+                showValue={true}
+                disabled={loading || Boolean(loadError)}
+                onChange={(value) => {
+                  settingsDirtyRef.current = true;
+                  setGameSettings((current) => ({
+                    ...current,
+                    volume: value
+                  }));
+                }}
+              />
+
+              <SliderField
+                label="Start Offset"
+                description="Choose where music starts from:"
+                value={gameSettings.startOffset}
+                min={0}
+                max={300}
+                step={1}
+                valueSuffix="s"
+                showValue={true}
+                disabled={loading || Boolean(loadError)}
+                onChange={(value) => {
+                  settingsDirtyRef.current = true;
+                  setGameSettings((current) => ({
+                    ...current,
+                    startOffset: value
+                  }));
+                }}
+              />
+
+              <DropdownItem
+                label="Playback Mode"
+                description="Choose playback behaviour:"
+                rgOptions={[
+                  { data: "loop", label: "Loop" },
+                  { data: "once", label: "Play Once" }
+                ]}
+                selectedOption={gameSettings.playbackMode}
+                disabled={loading || Boolean(loadError)}
+                onChange={(option) => {
+                  settingsDirtyRef.current = true;
+                  setGameSettings((current) => ({
+                    ...current,
+                    playbackMode: option.data
+                  }));
+                }}
+              />
+              <ButtonItem
+                label="Change Music File"
+                description={
+                  pickingMusic
+                    ? "Opening file picker..."
+                    : "Choose a different music file"
+                }
+                onClick={chooseMusic}
+                disabled={pickingMusic}
+              >
+                Browse local files
+              </ButtonItem>
+
+              {gameSettings.music && (
+                <ButtonItem
+                  label="Remove Music"
+                  description="Remove this game's music and reset its settings"
+                  onClick={confirmRemoveMusic}
+                  disabled={loading || Boolean(loadError)}
+                >
+                  Remove Music
+                </ButtonItem>
+              )}
+            </div>
+          </div>
+        </PanelSectionRow>
+      )}
 
       {pickerError && (
         <PanelSectionRow>
