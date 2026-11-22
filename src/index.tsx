@@ -1,7 +1,10 @@
-
 import {
   PanelSection,
   PanelSectionRow,
+  ModalRoot,
+  showModal,
+  SliderField,
+  DropdownItem,
   ToggleField,
   ButtonItem,
   MenuItem,
@@ -20,23 +23,58 @@ import {
 import {
   callable,
   definePlugin,
-  routerHook
+  routerHook,
 } from "@decky/api";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FaMusic } from "react-icons/fa";
+
+type GameSettings = {
+  music: string;
+  volume: number;
+  startOffset: number;
+  playbackMode: "loop" | "once";
+};
 
 type Settings = {
   enabled: boolean;
-  games: Record<string, string>;
+  games: Record<string, GameSettings>;
 };
 
 const getSettings = callable<[], Settings>("get_settings");
 const saveEnabled = callable<[enabled: boolean], boolean>("set_enabled");
+const saveGameSettings = callable<
+  [appId: string, settings: GameSettings],
+  GameSettings
+>("save_game_settings");
+type MusicDirectoryEntry = {
+  name: string;
+  path: string;
+  is_dir: boolean;
+};
+
+type MusicDirectory = {
+  path: string;
+  parent: string | null;
+  entries: MusicDirectoryEntry[];
+  error: string | null;
+};
+
+const listMusicDirectory = callable<
+  [directory: string],
+  MusicDirectory
+>("list_music_directory");
+
+const setGameMusic = callable<
+  [appId: string, path: string],
+  GameSettings
+>("set_game_music");
+
+const removeGameMusic = callable<[appId: string], boolean>("remove_game_music");
 
 function Content() {
   const [enabled, setEnabled] = useState(true);
-  const [games, setGames] = useState<Record<string, string>>({});
+  const [games, setGames] = useState<Record<string, GameSettings>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -108,12 +146,14 @@ function Content() {
             </div>
           </PanelSectionRow>
         ) : (
-          Object.entries(games).map(([appId, path]) => (
+          Object.entries(games).map(([appId, game]) => (
             <PanelSectionRow key={appId}>
               <div style={{ padding: "8px 0" }}>
                 <strong>Steam App ID: {appId}</strong>
                 <div style={{ opacity: 0.7, fontSize: "12px" }}>
-                  {path.split("/").pop()}
+                  {game.music
+                    ? game.music.split("/").pop()
+                    : "No music selected"}
                 </div>
               </div>
             </PanelSectionRow>
@@ -556,22 +596,445 @@ function patchSteamContextMenu() {
   }
 }
 
+
+type MusicBrowserModalProps = {
+  onSelect: (path: string) => Promise<void>;
+};
+
+function MusicBrowserModal({ onSelect }: MusicBrowserModalProps) {
+  const [directory, setDirectory] = useState<MusicDirectory | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selectingPath, setSelectingPath] = useState("");
+
+  const loadDirectory = async (path: string) => {
+    setLoading(true);
+    setError("");
+
+    try {
+      const result = await listMusicDirectory(path);
+
+      if (result.error) {
+        setDirectory(null);
+        setError(result.error);
+        return;
+      }
+
+      setDirectory(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadDirectory("/home/deck/Music");
+  }, []);
+
+  const handleEntryClick = async (entry: MusicDirectoryEntry) => {
+    if (entry.is_dir) {
+      await loadDirectory(entry.path);
+      return;
+    }
+
+    setSelectingPath(entry.path);
+    setError("");
+
+    try {
+      await onSelect(entry.path);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setSelectingPath("");
+    }
+  };
+
+  return (
+    <PanelSection title="Choose Background Music">
+      <PanelSectionRow>
+        <div style={{ padding: "8px 0", wordBreak: "break-all" }}>
+          <strong>Location:</strong> {directory?.path || "/home/deck/Music"}
+        </div>
+      </PanelSectionRow>
+
+      {directory?.parent && (
+        <ButtonItem
+          label=".."
+          description="Go to parent folder"
+          onClick={() => void loadDirectory(directory.parent!)}
+          disabled={loading || Boolean(selectingPath)}
+        />
+      )}
+
+      {loading ? (
+        <PanelSectionRow>
+          <div style={{ padding: "12px 0" }}>Loading folder...</div>
+        </PanelSectionRow>
+      ) : error && !directory ? (
+        <>
+          <PanelSectionRow>
+            <div style={{ padding: "12px 0", color: "#ff6b6b" }}>
+              {error}
+            </div>
+          </PanelSectionRow>
+          <ButtonItem
+            label="/home/deck"
+            description="Browse your home folder instead"
+            onClick={() => void loadDirectory("/home/deck")}
+          />
+        </>
+      ) : (
+        <>
+          {error && (
+            <PanelSectionRow>
+              <div style={{ padding: "8px 0", color: "#ff6b6b" }}>
+                {error}
+              </div>
+            </PanelSectionRow>
+          )}
+
+          {selectingPath && (
+            <PanelSectionRow>
+              <div style={{ padding: "8px 0" }}>
+                Assigning selected music...
+              </div>
+            </PanelSectionRow>
+          )}
+
+          {directory?.entries.map((entry) => (
+            <ButtonItem
+              key={entry.path}
+              label={entry.name}
+              description={entry.is_dir ? "Folder" : "Audio file — select to use"}
+              onClick={() => void handleEntryClick(entry)}
+              disabled={loading || Boolean(selectingPath)}
+            />
+          ))}
+
+          {directory?.entries.length === 0 && (
+            <PanelSectionRow>
+              <div style={{ padding: "12px 0" }}>
+                No folders or supported audio files here.
+              </div>
+            </PanelSectionRow>
+          )}
+        </>
+      )}
+    </PanelSection>
+  );
+}
+
 function GameSettingsPage() {
   const { appid } = useParams<{ appid: string }>();
+
+  const [gameTitle, setGameTitle] = useState("");
+
+  useEffect(() => {
+    let attempts = 0;
+
+    const updateGameTitle = () => {
+      const appId = Number(appid);
+      const title =
+        window.appDetailsStore?.GetAppDetails(appId)?.strDisplayName ||
+        window.appStore?.GetAppOverviewByAppID(appId)?.display_name;
+
+      if (title) {
+        setGameTitle(title);
+        return true;
+      }
+
+      return false;
+    };
+
+    if (updateGameTitle()) return;
+
+    const timer = window.setInterval(() => {
+      attempts += 1;
+
+      if (updateGameTitle() || attempts >= 20) {
+        window.clearInterval(timer);
+      }
+    }, 500);
+
+    return () => window.clearInterval(timer);
+  }, [appid]);
+
+  const [gameSettings, setGameSettings] = useState<GameSettings>({
+    music: "",
+    volume: 100,
+    startOffset: 0,
+    playbackMode: "loop"
+  });
+
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [pickingMusic, setPickingMusic] = useState(false);
+  const [pickerError, setPickerError] = useState("");
+
+  const gameSettingsRef = useRef(gameSettings);
+  gameSettingsRef.current = gameSettings;
+
+  const settingsDirtyRef = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+
+    settingsDirtyRef.current = false;
+
+    setLoading(true);
+    setLoadError("");
+
+    getSettings()
+      .then((settings) => {
+        if (!active) return;
+
+        const savedSettings = settings.games?.[appid];
+
+        setGameSettings(
+          savedSettings
+            ? { ...savedSettings }
+            : {
+                music: "",
+                volume: 100,
+                startOffset: 0,
+                playbackMode: "loop"
+              }
+        );
+      })
+      .catch((error) => {
+        console.error(
+          "GamePage BGM: Could not load game settings.",
+          error
+        );
+
+        if (active) {
+          setLoadError("Could not load game settings.");
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+
+      if (settingsDirtyRef.current) {
+        const pendingSettings = { ...gameSettingsRef.current };
+        settingsDirtyRef.current = false;
+
+        saveGameSettings(appid, pendingSettings).catch((error) => {
+          console.error(
+            "GamePage BGM: Could not save pending game settings.",
+            error
+          );
+        });
+      }
+    };
+  }, [appid]);
+
+  useEffect(() => {
+    if (loading || loadError || !settingsDirtyRef.current) {
+      return;
+    }
+
+    const timeout = setTimeout(async () => {
+      const settingsToSave = { ...gameSettingsRef.current };
+
+      try {
+        await saveGameSettings(appid, settingsToSave);
+
+        if (
+          JSON.stringify(gameSettingsRef.current) ===
+          JSON.stringify(settingsToSave)
+        ) {
+          settingsDirtyRef.current = false;
+        }
+      } catch (error) {
+        console.error(
+          "GamePage BGM: Could not automatically save game settings.",
+          error
+        );
+      }
+    }, 600);
+
+    return () => {
+      clearTimeout(timeout);
+    };
+  }, [gameSettings, loading, loadError, appid]);
+
+  const chooseMusic = () => {
+    setPickerError("");
+    setPickingMusic(true);
+
+    let modalHandle: ReturnType<typeof showModal> | null = null;
+
+    const closeBrowser = () => {
+      setPickingMusic(false);
+      modalHandle?.Close();
+    };
+
+    try {
+      modalHandle = showModal(
+        <ModalRoot onCancel={closeBrowser}>
+          <MusicBrowserModal
+            onSelect={async (path) => {
+              try {
+                const savedSettings = await setGameMusic(appid, path);
+
+                settingsDirtyRef.current = false;
+                setGameSettings(savedSettings);
+                closeBrowser();
+              } catch (error) {
+                console.error(
+                  "GamePage BGM: Could not assign selected music.",
+                  error
+                );
+
+                setPickerError(
+                  error instanceof Error ? error.message : String(error)
+                );
+
+                throw error;
+              }
+            }}
+          />
+        </ModalRoot>,
+        undefined,
+        {
+          strTitle: "Choose Background Music",
+          popupWidth: 900,
+          popupHeight: 650,
+          bNeverPopOut: true
+        }
+      );
+    } catch (error) {
+      console.error("GamePage BGM: Could not open music browser.", error);
+      setPickerError("Could not open the music browser.");
+      setPickingMusic(false);
+    }
+  };
 
   return (
     <PanelSection title="GamePage BGM">
       <PanelSectionRow>
         <div style={{ padding: "8px 0" }}>
-          Game settings for Steam App ID: {appid}
+          <div style={{ fontSize: "24px", fontWeight: 600, paddingBottom: "8px" }}>
+            {gameTitle || "Loading game title..."}
+          </div>
+          <strong>Steam App ID: {appid}</strong>
+
+          {loading ? (
+            <div>Loading settings...</div>
+          ) : loadError ? (
+            <div>{loadError}</div>
+          ) : (
+            <>
+              <div>
+                Music:{" "}
+                {gameSettings.music
+                  ? gameSettings.music.split("/").pop()
+                  : "None selected"}
+              </div>
+              <div>
+                Volume: {gameSettings.volume}%
+              </div>
+              <div>
+                Start offset: {gameSettings.startOffset}s
+              </div>
+              <div>
+                Playback:{" "}
+                {gameSettings.playbackMode === "loop"
+                  ? "Loop"
+                  : "Play Once"}
+              </div>
+            </>
+          )}
         </div>
       </PanelSectionRow>
+
+      <ButtonItem
+        label="Select Music"
+        description={
+          pickingMusic
+            ? "Opening file picker..."
+            : "Select an audio file for this game"
+        }
+        onClick={chooseMusic}
+        disabled={loading || Boolean(loadError) || pickingMusic}
+      >
+        Browse local files
+      </ButtonItem>
+
+      <SliderField
+        label="Volume"
+        description="Adjust music volume (0–200%):"
+        value={gameSettings.volume}
+        min={0}
+        max={200}
+        step={1}
+        valueSuffix="%"
+        showValue={true}
+        disabled={loading || Boolean(loadError)}
+        onChange={(value) => {
+          settingsDirtyRef.current = true;
+          setGameSettings((current) => ({
+            ...current,
+            volume: value
+          }));
+        }}
+      />
+
+      <SliderField
+        label="Start Offset"
+        description="Choose where music starts from (0-300s):"
+        value={gameSettings.startOffset}
+        min={0}
+        max={300}
+        step={1}
+        valueSuffix="s"
+        showValue={true}
+        disabled={loading || Boolean(loadError)}
+        onChange={(value) => {
+          settingsDirtyRef.current = true;
+          setGameSettings((current) => ({
+            ...current,
+            startOffset: value
+          }));
+        }}
+      />
+
+      <DropdownItem
+        label="Playback Mode"
+        description="Choose playback behaviour:"
+        rgOptions={[
+          { data: "loop", label: "Loop" },
+          { data: "once", label: "Play Once" }
+        ]}
+        selectedOption={gameSettings.playbackMode}
+        disabled={loading || Boolean(loadError)}
+        onChange={(option) => {
+          settingsDirtyRef.current = true;
+          setGameSettings((current) => ({
+            ...current,
+            playbackMode: option.data
+          }));
+        }}
+      />
+
+      {pickerError && (
+        <PanelSectionRow>
+          <div style={{ padding: "8px 0", color: "#ff6b6b" }}>
+            {pickerError}
+          </div>
+        </PanelSectionRow>
+      )}
     </PanelSection>
   );
 }
 
 const GAME_SETTINGS_ROUTE = "/gamepage-bgm/:appid";
-
 
 export default definePlugin(() => {
   routerHook.addRoute(GAME_SETTINGS_ROUTE, GameSettingsPage);

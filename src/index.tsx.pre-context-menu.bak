@@ -1,0 +1,346 @@
+
+import {
+  PanelSection,
+  PanelSectionRow,
+  ToggleField,
+  ButtonItem,
+  MenuItem,
+  Navigation,
+  staticClasses,
+  useParams,
+  findInReactTree,
+  findInTree,
+  findModuleDetailsByExport,
+  beforePatch
+} from "@decky/ui";
+
+import {
+  callable,
+  definePlugin,
+  routerHook
+} from "@decky/api";
+
+import { useEffect, useState } from "react";
+import { FaMusic } from "react-icons/fa";
+
+type Settings = {
+  enabled: boolean;
+  games: Record<string, string>;
+};
+
+const getSettings = callable<[], Settings>("get_settings");
+const saveEnabled = callable<[enabled: boolean], boolean>("set_enabled");
+
+function Content() {
+  const [enabled, setEnabled] = useState(true);
+  const [games, setGames] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+
+    getSettings()
+      .then((settings) => {
+        if (!mounted) return;
+
+        setEnabled(settings.enabled);
+        setGames(settings.games || {});
+      })
+      .catch((error) => {
+        console.error("GamePage BGM: Could not load settings", error);
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const onToggle = async (value: boolean) => {
+    try {
+      await saveEnabled(value);
+      setEnabled(value);
+    } catch (error) {
+      console.error("GamePage BGM: Could not save setting", error);
+    }
+  };
+
+  return (
+    <PanelSection title="GamePage BGM">
+      <PanelSectionRow>
+        <ToggleField
+          label="Enable GamePage BGM"
+          description="Automatically play music on individual game pages."
+          checked={enabled}
+          onChange={onToggle}
+        />
+      </PanelSectionRow>
+
+      <PanelSectionRow>
+        <ButtonItem
+          label="Test Game Settings Route"
+          description="Temporarily open the Armored Core VI settings page."
+          onClick={() => Navigation.Navigate("/gamepage-bgm/1888160")}
+        />
+      </PanelSectionRow>
+
+      <PanelSectionRow>
+        <div style={{ padding: "8px 0", opacity: 0.8 }}>
+          Music only plays on individual game details pages.
+          Home, Library and Store pages remain silent.
+        </div>
+      </PanelSectionRow>
+
+      <PanelSection title="Game Music Assignments">
+        {loading ? (
+          <PanelSectionRow>
+            <div>Loading settings...</div>
+          </PanelSectionRow>
+        ) : Object.keys(games).length === 0 ? (
+          <PanelSectionRow>
+            <div style={{ padding: "8px 0", opacity: 0.7 }}>
+              No games configured yet.
+            </div>
+          </PanelSectionRow>
+        ) : (
+          Object.entries(games).map(([appId, path]) => (
+            <PanelSectionRow key={appId}>
+              <div style={{ padding: "8px 0" }}>
+                <strong>Steam App ID: {appId}</strong>
+                <div style={{ opacity: 0.7, fontSize: "12px" }}>
+                  {path.split("/").pop()}
+                </div>
+              </div>
+            </PanelSectionRow>
+          ))
+        )}
+      </PanelSection>
+    </PanelSection>
+  );
+}
+
+const GAME_MENU_ITEM_KEY = "gamepage-bgm-change-music";
+
+function getAppId(...candidates: any[]): string | null {
+  for (const candidate of candidates) {
+    const value =
+      candidate?.appid ??
+      candidate?.app_id ??
+      candidate?.unAppID ??
+      candidate?.nAppID ??
+      candidate?.id ??
+      candidate;
+
+    const parsed = Number.parseInt(String(value), 10);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      return String(parsed);
+    }
+  }
+  return null;
+}
+
+function findAppIdInTree(root: any): string | null {
+  const seen = new WeakSet<object>();
+
+  const visit = (node: any): string | null => {
+    if (!node || typeof node !== "object") return null;
+    if (seen.has(node)) return null;
+    seen.add(node);
+
+    const direct = getAppId(
+      node.appid,
+      node.app_id,
+      node.overview?.appid,
+      node.app?.appid,
+      node.props?.appid,
+      node.props?.app_id,
+      node.props?.overview?.appid,
+      node.props?.app?.appid,
+      node._owner?.pendingProps?.overview?.appid
+    );
+    if (direct) return direct;
+
+    for (const key of ["props", "children", "_owner", "pendingProps"]) {
+      const found = visit(node[key]);
+      if (found) return found;
+    }
+
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const found = visit(child);
+        if (found) return found;
+      }
+    }
+
+    return null;
+  };
+
+  return visit(root);
+}
+
+function collectMenuArrays(root: any): any[][] {
+  const arrays: any[][] = [];
+  const seen = new WeakSet<object>();
+
+  const visit = (node: any): void => {
+    if (!node || typeof node !== "object") return;
+    if (seen.has(node)) return;
+    seen.add(node);
+
+    if (Array.isArray(node)) {
+      arrays.push(node);
+      node.forEach(visit);
+      return;
+    }
+
+    visit(node.props?.children);
+    visit(node.children);
+  };
+
+  visit(root);
+  return arrays;
+}
+
+function insertGamePageBGMMenuItem(menuChildren: any): boolean {
+  const arrays = collectMenuArrays(menuChildren);
+  const appId = findAppIdInTree(menuChildren);
+
+  if (!appId || arrays.length === 0) return false;
+
+  const menuItems = arrays.find((items) =>
+    items.some((item) =>
+      findInReactTree(
+        item,
+        (node: any) =>
+          typeof node?.onSelected === "function" &&
+          (
+            node.onSelected.toString().includes("AppProperties") ||
+            node.onSelected.toString().includes("launchSource")
+          )
+      )
+    )
+  );
+
+  if (!menuItems) return false;
+
+  const existingIndex = menuItems.findIndex(
+    (item) => item?.key === GAME_MENU_ITEM_KEY
+  );
+  if (existingIndex !== -1) {
+    menuItems.splice(existingIndex, 1);
+  }
+
+  const propertiesIndex = menuItems.findIndex((item) =>
+    findInReactTree(
+      item,
+      (node: any) =>
+        typeof node?.onSelected === "function" &&
+        node.onSelected.toString().includes("AppProperties")
+    )
+  );
+
+  const menuItem = (
+    <MenuItem
+      key={GAME_MENU_ITEM_KEY}
+      onSelected={() => {
+        Navigation.CloseSideMenus();
+        Navigation.Navigate(`/gamepage-bgm/${appId}`);
+      }}
+    >
+      Choose Background Music
+    </MenuItem>
+  );
+
+  if (propertiesIndex >= 0) {
+    menuItems.splice(propertiesIndex, 0, menuItem);
+  } else {
+    menuItems.push(menuItem);
+  }
+
+  return true;
+}
+
+function patchSteamContextMenu() {
+  try {
+    const [module, _matchedExport, exportName] =
+      findModuleDetailsByExport(
+        (candidate: any) => {
+          const source = candidate?.toString?.();
+          return (
+            typeof source === "string" &&
+            source.includes("GetContextMenuManagerFromWindow(") &&
+            source.includes(".CreateContextMenuInstance(")
+          );
+        },
+        1
+      );
+
+    if (
+      !module ||
+      !exportName ||
+      typeof module[exportName] !== "function"
+    ) {
+      console.error(
+        "GamePage BGM: Could not find Steam context-menu creation function."
+      );
+      return null;
+    }
+
+    const patch = beforePatch(
+      module,
+      exportName,
+      (args: any[]) => {
+        insertGamePageBGMMenuItem(args?.[0]);
+      }
+    );
+
+    console.log("GamePage BGM: Steam context-menu patch installed.");
+
+    return () => {
+      patch?.unpatch();
+      console.log("GamePage BGM: Steam context-menu patch removed.");
+    };
+  } catch (error) {
+    console.error("GamePage BGM: Context-menu patch failed.", error);
+    return null;
+  }
+}
+
+function GameSettingsPage() {
+  const { appid } = useParams<{ appid: string }>();
+
+  return (
+    <PanelSection title="GamePage BGM">
+      <PanelSectionRow>
+        <div style={{ padding: "8px 0" }}>
+          Game settings for Steam App ID: {appid}
+        </div>
+      </PanelSectionRow>
+    </PanelSection>
+  );
+}
+
+const GAME_SETTINGS_ROUTE = "/gamepage-bgm/:appid";
+
+export default definePlugin(() => {
+  routerHook.addRoute(GAME_SETTINGS_ROUTE, GameSettingsPage);
+
+  console.log("GamePage BGM initialized");
+
+  return {
+    name: "GamePage BGM",
+    titleView: (
+      <div className={staticClasses.Title}>
+        GamePage BGM
+      </div>
+    ),
+    content: <Content />,
+    icon: <FaMusic />,
+    onDismount() {
+      routerHook.removeRoute(GAME_SETTINGS_ROUTE);
+      console.log("GamePage BGM unloaded");
+    }
+  };
+});
